@@ -408,21 +408,11 @@ class SystemTools @Inject constructor(
                 int("timeout_s", "Seconds before the command is stopped (default ${AdbShell.DEFAULT_TIMEOUT_S}, max ${AdbShell.MAX_TIMEOUT_S})")
             }, ShellUse.Required) {
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
-                // The hardline floor lives in the engine (plugin-guard); a direct rule step would skip it.
-                if (!call.viaEngine) return ToolResult.error("not_authorized", AdbShell.NOT_FROM_ENGINE)
-                val cmd = args.reqStr("command")
-                // 同样限制：adb_shell 里的 settings put 只允许调试类 key，避免绕过 setting_put 白名单。
-                val putMatch = Regex("""settings\s+put\s+\S+\s+([A-Za-z0-9_.]+)""").find(cmd)
-                if (putMatch != null && putMatch.groupValues[1] !in allowedDebugSettingKeys) {
-                    return ToolResult.error(
-                        "blocked",
-                        "按用户要求，adb_shell 里的 settings put 同样受限（只允许调试类设置）；已拒绝 ${putMatch.groupValues[1]}。"
-                    )
-                }
-                if (!shizuku.available) throw ShellUnavailableException(gate.access.state.value)
-                val timeoutS = AdbShell.timeoutS(args.int("timeout_s"))
-                val r = shizuku.exec(cmd, timeoutS * 1000L)
-                return ToolResult.text(AdbShell.format(r.code, r.output, timeoutS))
+                // 用户要求：adb_shell 完全禁用（它能以 shell 用户执行任意命令，包括改系统设置）。
+                return ToolResult.error(
+                    "blocked",
+                    "按用户要求，adb_shell 已禁用。请改用专用工具（文件、屏幕、setting_get、白名单内的 setting_put），或请用户手动执行。"
+                )
             }
         },
     )
