@@ -23,16 +23,22 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Install SDK platform 37.2 and build-tools
         run: |
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager --list | grep -E "platforms;android-3[67]" | head -20 || true
-          sdkmanager "platforms;android-37.2" "platform-tools" || \
-          sdkmanager "platforms;android-37" "platform-tools" || true
-          sdkmanager --list_installed | grep platforms || true
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          echo "SDK_ROOT=$SDK_ROOT"
+          echo "ANDROID_HOME=$ANDROID_HOME ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          ls "$SDK_ROOT" 2>/dev/null || true
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find / -name sdkmanager -type f 2>/dev/null | head -1)"
+          fi
+          echo "SDKMANAGER=$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" --list 2>/dev/null | grep -E "platforms;android-3[67]" | head -20 || true
+          "$SDKMANAGER" "platforms;android-37.2" "platform-tools" || \
+          "$SDKMANAGER" --channel=3 "platforms;android-37.2" "platform-tools" || true
+          "$SDKMANAGER" --list_installed 2>/dev/null | grep platforms || true
 
       - name: Fetch prebuilt native libs (libnode etc.)
         run: |
