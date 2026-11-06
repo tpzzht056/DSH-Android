@@ -51,6 +51,24 @@ class SystemTools @Inject constructor(
 ) : ToolSet {
     private val shizuku get() = gate.shell
 
+    /**
+     * 用户要求：只允许修改调试类系统设置（如坐标/触摸显示），其余 `settings put` 一律拒绝。
+     * setting_put 和 adb_shell 共用这份白名单，避免从 shell 绕过。
+     */
+    private val allowedDebugSettingKeys = setOf(
+        "pointer_location",             // 显示指针/坐标
+        "show_touches",                 // 显示触摸点
+        "development_settings_enabled", // 开发者选项总开关
+        "adb_enabled",                  // USB 调试
+        "window_animation_scale",       // 动画缩放（开发调试常用）
+        "transition_animation_scale",
+        "animator_duration_scale",
+        "debug_view_attributes",        // 显示视图属性
+        "debug_app",                    // 调试应用
+        "debug_gpu_overdraw",           // GPU 过度绘制
+        "debug_layout",                 // 布局边界
+    )
+
     /** When the system's next alarm clock rings (epoch ms), or null when none is reported. */
     private fun nextAlarm(): Long? = runCatching { context.getSystemService(AlarmManager::class.java).nextAlarmClock?.triggerTime }.getOrNull()
 
@@ -373,9 +391,16 @@ class SystemTools @Inject constructor(
                 string("key", "", required = true); string("value", "", required = true)
             }, ShellUse.Required) {
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
+                val key = args.reqStr("key").filter { it.isLetterOrDigit() || it in "_." }
+                if (key !in allowedDebugSettingKeys) {
+                    return ToolResult.error(
+                        "blocked",
+                        "按用户要求，setting_put 只允许修改调试类设置（${allowedDebugSettingKeys.joinToString(", ")}）；已拒绝 $key。"
+                    )
+                }
                 // An empty value is legitimate (e.g. clearing enabled_accessibility_services, #8).
                 val v = (args.str("value") ?: throw InvalidArgsException("missing 'value'")).replace("'", "")
-                return shell("settings put ${args.reqStr("namespace")} ${args.reqStr("key").filter { it.isLetterOrDigit() || it in "_." }} '$v'", "change setting")
+                return shell("settings put ${args.reqStr("namespace")} $key '$v'", "change setting")
             }
         },
         object : Tool(AdbShell.NAME, ToolGroup.System, Risk.write, false, AdbShell.DESCRIPTION, {
@@ -386,6 +411,14 @@ class SystemTools @Inject constructor(
                 // The hardline floor lives in the engine (plugin-guard); a direct rule step would skip it.
                 if (!call.viaEngine) return ToolResult.error("not_authorized", AdbShell.NOT_FROM_ENGINE)
                 val cmd = args.reqStr("command")
+                // 同样限制：adb_shell 里的 settings put 只允许调试类 key，避免绕过 setting_put 白名单。
+                val putMatch = Regex("""settings\s+put\s+\S+\s+([A-Za-z0-9_.]+)""").find(cmd)
+                if (putMatch != null && putMatch.groupValues[1] !in allowedDebugSettingKeys) {
+                    return ToolResult.error(
+                        "blocked",
+                        "按用户要求，adb_shell 里的 settings put 同样受限（只允许调试类设置）；已拒绝 ${putMatch.groupValues[1]}。"
+                    )
+                }
                 if (!shizuku.available) throw ShellUnavailableException(gate.access.state.value)
                 val timeoutS = AdbShell.timeoutS(args.int("timeout_s"))
                 val r = shizuku.exec(cmd, timeoutS * 1000L)
