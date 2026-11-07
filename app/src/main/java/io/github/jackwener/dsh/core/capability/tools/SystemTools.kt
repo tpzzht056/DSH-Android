@@ -51,23 +51,8 @@ class SystemTools @Inject constructor(
 ) : ToolSet {
     private val shizuku get() = gate.shell
 
-    /**
-     * 用户要求：只允许修改调试类系统设置（如坐标/触摸显示），其余 `settings put` 一律拒绝。
-     * setting_put 和 adb_shell 共用这份白名单，避免从 shell 绕过。
-     */
-    private val allowedDebugSettingKeys = setOf(
-        "pointer_location",             // 显示指针/坐标
-        "show_touches",                 // 显示触摸点
-        "development_settings_enabled", // 开发者选项总开关
-        "adb_enabled",                  // USB 调试
-        "window_animation_scale",       // 动画缩放（开发调试常用）
-        "transition_animation_scale",
-        "animator_duration_scale",
-        "debug_view_attributes",        // 显示视图属性
-        "debug_app",                    // 调试应用
-        "debug_gpu_overdraw",           // GPU 过度绘制
-        "debug_layout",                 // 布局边界
-    )
+    /** 用户要求：只允许修改调试类系统设置（如坐标/触摸显示），其余 `settings put` 一律拒绝。 */
+    private val allowedDebugSettingKeys = DEBUG_SETTING_KEYS
 
     /** When the system's next alarm clock rings (epoch ms), or null when none is reported. */
     private fun nextAlarm(): Long? = runCatching { context.getSystemService(AlarmManager::class.java).nextAlarmClock?.triggerTime }.getOrNull()
@@ -408,15 +393,33 @@ class SystemTools @Inject constructor(
                 int("timeout_s", "Seconds before the command is stopped (default ${AdbShell.DEFAULT_TIMEOUT_S}, max ${AdbShell.MAX_TIMEOUT_S})")
             }, ShellUse.Required) {
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
-                // 用户要求：adb_shell 完全禁用（它能以 shell 用户执行任意命令，包括改系统设置）。
-                return ToolResult.error(
-                    "blocked",
-                    "按用户要求，adb_shell 已禁用。请改用专用工具（文件、屏幕、setting_get、白名单内的 setting_put），或请用户手动执行。"
-                )
+                if (!call.viaEngine) return ToolResult.error("not_authorized", AdbShell.NOT_FROM_ENGINE)
+                val cmd = args.reqStr("command")
+                // 用户要求：adb_shell 可用，但危险命令过滤（改设置/重启/卸载类一律拒绝）。
+                AdbShell.filterBlocked(cmd)?.let { return ToolResult.error("blocked", it) }
+                if (!shizuku.available) throw ShellUnavailableException(gate.access.state.value)
+                val timeoutS = AdbShell.timeoutS(args.int("timeout_s"))
+                val r = shizuku.exec(cmd, timeoutS * 1000L)
+                return ToolResult.text(AdbShell.format(r.code, r.output, timeoutS))
             }
         },
     )
 }
+
+/** 用户要求：setting_put 与 adb_shell 的 settings 修改都只允许这些调试类 key。 */
+private val DEBUG_SETTING_KEYS = setOf(
+    "pointer_location",             // 显示指针/坐标
+    "show_touches",                 // 显示触摸点
+    "development_settings_enabled", // 开发者选项总开关
+    "adb_enabled",                  // USB 调试
+    "window_animation_scale",       // 动画缩放（开发调试常用）
+    "transition_animation_scale",
+    "animator_duration_scale",
+    "debug_view_attributes",        // 显示视图属性
+    "debug_app",                    // 调试应用
+    "debug_gpu_overdraw",           // GPU 过度绘制
+    "debug_layout",                 // 布局边界
+)
 
 /** `adb_shell`: a command as the shell user through Shizuku (= `adb shell <command>`), for what an app's own shell cannot do. */
 internal object AdbShell {
@@ -435,6 +438,29 @@ internal object AdbShell {
 
     const val NOT_FROM_ENGINE = "adb_shell runs only from a conversation or an automation's agent run (where DSH's command safety checks see it), " +
         "not as a direct automation step. Make the automation an agent action instead."
+
+    /**
+     * 用户要求：adb_shell 允许执行，但过滤危险命令。返回 null 表示放行，否则返回拒绝原因。
+     * - `settings put/delete/reset`：只允许调试类 key（与 setting_put 共用白名单）
+     * - 重启/关机、卸载/禁用/清数据：一律拒绝
+     */
+    fun filterBlocked(cmd: String): String? {
+        val lower = cmd.lowercase()
+        val settingWrite = Regex("""\bsettings\s+(put|delete|reset)\s+\S+\s+([a-z0-9_.]+)""").find(lower)
+        if (settingWrite != null) {
+            val key = settingWrite.groupValues[2].trimEnd(';', '"', '\'')
+            if (key !in DEBUG_SETTING_KEYS) {
+                return "按用户要求，adb_shell 不能修改系统设置（只允许调试类 key：${DEBUG_SETTING_KEYS.joinToString(", ")}）；已拒绝 $key。"
+            }
+        }
+        if (Regex("""\b(reboot|shutdown|poweroff)\b""").containsMatchIn(lower)) {
+            return "按用户要求，adb_shell 不允许重启/关机设备。"
+        }
+        if (Regex("""\bpm\s+(uninstall|disable|clear|clear-data)\b""").containsMatchIn(lower)) {
+            return "按用户要求，adb_shell 不允许卸载/禁用/清数据应用。"
+        }
+        return null
+    }
 
     fun timeoutS(requested: Int?): Int = (requested ?: DEFAULT_TIMEOUT_S).coerceIn(1, MAX_TIMEOUT_S)
 
